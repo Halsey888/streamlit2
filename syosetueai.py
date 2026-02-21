@@ -2,18 +2,50 @@ import streamlit as st
 import google.generativeai as genai
 import os
 import random
+import json
+
+# --- 持久化設定 ---
+SAVE_FILE = "novel_history.json"
+
+def save_to_local():
+    """將當前對話紀錄存入檔案"""
+    data = {
+        "messages": st.session_state.messages,
+        "chat_history": [
+            {"role": m.role, "parts": [p.text for p in m.parts]} 
+            for m in st.session_state.chat_history
+        ],
+        "style_guide": st.session_state.style_guide
+    }
+    with open(SAVE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def load_from_local():
+    """從檔案讀取舊紀錄"""
+    if os.path.exists(SAVE_FILE):
+        try:
+            with open(SAVE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                st.session_state.messages = data.get("messages", [])
+                st.session_state.style_guide = data.get("style_guide", "")
+                # 重新還原為 Gemini 可讀的格式
+                st.session_state.chat_history = [
+                    {"role": h["role"], "parts": h["parts"]} for h in data.get("chat_history", [])
+                ]
+                return True
+        except: return False
+    return False
 
 # 1. 頁面配置
 st.set_page_config(page_title="Gemini 韓漫風格助手", layout="wide")
-st.title("🖋️ Gemini 小說助手 (風格指南強化版)")
+st.title("🖋️ Gemini 小說助手 (紀錄自動保存版)")
 
-# 2. 初始化 Session State
+# 2. 初始化 Session State (先嘗試讀取舊檔)
 if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "style_guide" not in st.session_state:
-    st.session_state.style_guide = "" # 存放提取出的風格指南
+    if not load_from_local():
+        st.session_state.messages = []
+        st.session_state.chat_history = []
+        st.session_state.style_guide = ""
 
 # --- 側邊欄：設定 ---
 with st.sidebar:
@@ -21,26 +53,37 @@ with st.sidebar:
     api_key = st.text_input("輸入 Gemini API Key", type="password")
     
     st.divider()
+    # 新增：備份下載按鈕 (這是給手滑後的最後一道保險)
+    if st.session_state.messages:
+        history_json = json.dumps({
+            "messages": st.session_state.messages,
+            "style_guide": st.session_state.style_guide
+        }, ensure_ascii=False)
+        st.download_button(
+            label="📥 下載對話備份 (以防雲端重置)",
+            data=history_json,
+            file_name="novel_backup.json",
+            mime="application/json"
+        )
+
+    st.divider()
     novel_path = st.text_input("【我的草稿路徑】")
     ref_path = st.text_input("【海量參考路徑】")
     
-    # 風格指南區塊
     st.subheader("📝 韓式寫作風格指南")
     if st.button("🪄 從樣本提取風格基因"):
         if not api_key or not ref_path:
             st.error("請先輸入 API Key 與 參考路徑！")
         else:
-            with st.spinner("正在分析 150 萬字樣本中的風格精華..."):
-                # 這裡調用 AI 進行一次性分析
+            with st.spinner("正在分析樣本..."):
                 genai.configure(api_key=api_key)
-                temp_model = genai.GenerativeModel("gemini-2.5-flash") # 用 Flash 提取省錢又快
+                temp_model = genai.GenerativeModel("gemini-1.5-flash") 
                 
-                # 抽樣讀取參考資料
                 def get_sample_for_analysis(path):
                     files = [f for f in os.listdir(path) if f.endswith(('.txt', '.md'))]
                     random.shuffle(files)
                     content = ""
-                    for f in files[:5]: # 抽 5 個檔
+                    for f in files[:5]:
                         with open(os.path.join(path, f), 'r', encoding='utf-8') as file:
                             content += file.read()[:3000] + "\n"
                     return content
@@ -147,6 +190,10 @@ if prompt := st.chat_input("輸入你想討論的段落..."):
                 
                 st.session_state.messages.append({"role": "assistant", "content": full_response})
                 st.session_state.chat_history = chat_session.history
+
+                # --- 每回覆一次，就執行一次自動存檔 ---
+                save_to_local()
             except Exception as e:
                 st.error(f"發生錯誤：{str(e)}")
+
 
